@@ -355,6 +355,8 @@ static const VMStateDescription vu_media_vmstate = {
 
 static const Property vu_media_properties[] = {
     DEFINE_PROP_CHR("chardev", VHostUserMEDIA, conf.chardev),
+    DEFINE_PROP_BOOL("memory-isolation",
+                     VHostUserMEDIA, conf.memory_isolation, false),
 };
 
 static void vu_media_class_init(ObjectClass *klass, const void *data)

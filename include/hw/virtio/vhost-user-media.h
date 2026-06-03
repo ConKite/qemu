@@ -29,6 +29,7 @@ struct virtio_media_config {
 
 typedef struct {
     CharFrontend chardev;
+    bool memory_isolation;
 } VHostUserMEDIAConf;
 
 struct VHostUserMEDIA {
