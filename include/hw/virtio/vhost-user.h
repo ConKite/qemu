@@ -67,18 +67,21 @@ typedef struct VhostUserHostNotifier {
  * @chr: the character backend for the socket
  * @notifiers: GPtrArray of @VhostUserHostnotifier
  * @memory_slots:
+ * @memory_isolation: determines whether data is shared or copied
  */
 typedef struct VhostUserState {
     CharFrontend *chr;
     GPtrArray *notifiers;
     int memory_slots;
     bool supports_config;
+    bool memory_isolation;
 } VhostUserState;
 
 /**
  * vhost_user_init() - initialise shared vhost_user state
  * @user: allocated area for storing shared state
  * @chr: the chardev for the vhost socket
+ * @memory_isolation: restrict direct access to guest memory from back-end
  * @errp: error handle
  *
  * User can either directly g_new() space for the state or embed
@@ -87,7 +90,8 @@ typedef struct VhostUserState {
  *
  * Return: true on success, false on error while setting errp.
  */
-bool vhost_user_init(VhostUserState *user, CharFrontend *chr, Error **errp);
+bool vhost_user_init(VhostUserState *user, CharFrontend *chr,
+                     bool memory_isolation, Error **errp);
 
 /**
  * vhost_user_cleanup() - cleanup state

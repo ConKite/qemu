@@ -269,7 +269,8 @@ static void vu_media_device_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (!vhost_user_init(&media->vhost_user, &media->conf.chardev, errp)) {
+    if (!vhost_user_init(&media->vhost_user,
+        &media->conf.chardev, false, errp)) {
         return;
     }
 
