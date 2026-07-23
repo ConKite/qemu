@@ -350,7 +350,7 @@ int vhost_svq_add(VhostShadowVirtqueue *svq, const struct iovec *out_sg,
 }
 
 /* Convenience wrapper to add a guest's element to SVQ */
-static int vhost_svq_add_element(VhostShadowVirtqueue *svq,
+int vhost_svq_add_element(VhostShadowVirtqueue *svq,
                                  VirtQueueElement *elem)
 {
     return vhost_svq_add(svq, elem->out_sg, elem->out_num, elem->out_addr,
@@ -860,6 +860,19 @@ void vhost_svq_set_svq_kick_fd(VhostShadowVirtqueue *svq, int svq_kick_fd)
         event_notifier_set_handler(svq_kick, vhost_handle_guest_kick_notifier);
     }
 }
+
+/**
+ * Set vring base address if using fixed locations
+ *
+ * @svq: Shadow Virtqueue
+ * @addr: Points to new base address
+ */
+
+ void vhost_svq_set_base_addr(VhostShadowVirtqueue *svq, void *addr)
+ {
+    svq->base_addr = addr;
+ }
+
 
 /**
  * Start the shadow virtqueue operation.
