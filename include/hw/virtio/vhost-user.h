@@ -72,6 +72,7 @@ typedef struct VhostUserHostNotifier {
  * @size: size of the mapped shared memory
  * @fd: descriptor of anonymous file backing shared iso region
  * @iso_iova_offset: translation from IOVA to hva of iso region
+ * @shadow_vqs: shadow vqs with vrings in iso region
  */
 typedef struct {
     void *shared_mem_addr;
@@ -81,6 +82,7 @@ typedef struct {
     size_t size;
     int fd;
     uintptr_t iso_iova_offset;
+    GPtrArray *shadow_vqs;
 } IsolationModeCtx;
 
 /**

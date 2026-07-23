@@ -18,6 +18,7 @@
 #include "hw/virtio/vhost-backend.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-net.h"
+#include "hw/virtio/vhost-shadow-virtqueue.h"
 #include "hw/virtio/vhost-iova-tree.h"
 #include "hw/virtio/vhost-shadow-virtqueue.h"
 #include "chardev/char-fe.h"
@@ -1117,11 +1118,33 @@ static int vhost_user_set_mem_table_postcopy(struct vhost_dev *dev,
     return 0;
 }
 
-static void cleanup_isolation_regions(struct vhost_dev *dev)
+static void vhost_user_svq_cleanup(struct VhostUserState *user, bool reset)
+{
+    if (user->iso_mem_ctx.shadow_vqs) {
+        VhostShadowVirtqueue *svq;
+        for (int i = 0; i < user->iso_mem_ctx.shadow_vqs->len; i++) {
+            svq = g_ptr_array_index(user->iso_mem_ctx.shadow_vqs, i);
+            vhost_svq_stop(svq);
+            event_notifier_cleanup(&svq->hdev_call);
+            event_notifier_cleanup(&svq->hdev_kick);
+        }
+    }
+
+    if (!reset) {
+        g_ptr_array_free(user->iso_mem_ctx.shadow_vqs, true);
+        user->iso_mem_ctx.shadow_vqs = NULL;
+    }
+}
+
+static void cleanup_isolation_regions(struct vhost_dev *dev, bool reset)
 {
     struct vhost_user *u = dev->opaque;
     VhostUserState *user = u->user;
+    vhost_user_svq_cleanup(user, reset);
+
     if (user->iso_mem_ctx.shared_mem_addr) {
+        GPtrArray *temp = user->iso_mem_ctx.shadow_vqs;
+
         if (user->iso_mem_ctx.tree) {
             vhost_iova_tree_delete(user->iso_mem_ctx.tree);
         }
@@ -1129,6 +1152,10 @@ static void cleanup_isolation_regions(struct vhost_dev *dev)
                         user->iso_mem_ctx.size,
                         user->iso_mem_ctx.fd);
         memset(&user->iso_mem_ctx, 0, sizeof(IsolationModeCtx));
+
+        if (reset) {
+            user->iso_mem_ctx.shadow_vqs = temp;
+        }
     }
 }
 
@@ -1231,7 +1258,7 @@ static int init_isolation_regions(struct vhost_dev *dev,
      */
     if (dev->vq_index == 0) {
         /* In case of reset, clear old regions */
-        cleanup_isolation_regions(dev);
+        cleanup_isolation_regions(dev, true);
 
         /* Gather information for bounce buffers to be mapped */
         for (u_int32_t i = 0; i < nregions; i++) {
@@ -1274,7 +1301,7 @@ static int init_isolation_regions(struct vhost_dev *dev,
 
         if (err) {
             error_report_err(err);
-            cleanup_isolation_regions(dev);
+            cleanup_isolation_regions(dev, false);
             return -1;
         }
 
@@ -1300,7 +1327,7 @@ static int init_isolation_regions(struct vhost_dev *dev,
             (hwaddr)user->iso_mem_ctx.shared_mem_addr);
 
         if (r != IOVA_OK) {
-            cleanup_isolation_regions(dev);
+            cleanup_isolation_regions(dev, false);
             return r;
         }
 
@@ -1314,7 +1341,7 @@ static int init_isolation_regions(struct vhost_dev *dev,
                 dev->mem->regions[i].guest_phys_addr);
 
             if (r != IOVA_OK) {
-                cleanup_isolation_regions(dev);
+                cleanup_isolation_regions(dev, false);
                 return r;
             }
         }
@@ -1769,11 +1796,52 @@ static int vhost_set_vring_file(struct vhost_dev *dev,
     return 0;
 }
 
+static int vhost_user_get_vq_index(struct vhost_dev *dev, int idx)
+{
+    assert(idx >= dev->vq_index && idx < dev->vq_index + dev->nvqs);
+
+    return idx;
+}
+
 static int vhost_user_set_vring_kick(struct vhost_dev *dev,
                                      struct vhost_vring_file *file)
 {
-    int ret = vhost_set_vring_file(dev, VHOST_USER_SET_VRING_KICK, file);
+    struct vhost_user *u = dev->opaque;
+    VhostUserState *user = u->user;
+    VhostShadowVirtqueue *svq = NULL;
+    struct vhost_vring_file vr_file = *file;
+    int ret;
+
+    vhost_user_get_vq_index(dev, file->index); /* bounds checking */
+
+    if (u->user->memory_isolation) {
+        svq = g_ptr_array_index(user->iso_mem_ctx.shadow_vqs, file->index);
+        vhost_svq_set_svq_kick_fd(svq, file->fd);
+
+        if (file->fd != -1) {
+            if (!svq->hdev_kick.initialized) {
+                ret = event_notifier_init(&svq->hdev_kick, 0);
+                if (ret < 0) {
+                    event_notifier_cleanup(&svq->hdev_kick);
+                    vhost_svq_set_svq_kick_fd(svq, -1);
+                    error_report("Failed to create kick event notifier");
+                    return ret;
+                }
+            }
+
+            vr_file.fd = event_notifier_get_fd(&svq->hdev_kick);
+        } else {
+            event_notifier_cleanup(&svq->hdev_kick);
+            vhost_svq_set_svq_kick_fd(svq, -1);
+        }
+    }
+
+    ret = vhost_set_vring_file(dev, VHOST_USER_SET_VRING_KICK, &vr_file);
     if (ret < 0) {
+        if (svq != NULL) {
+            event_notifier_cleanup(&svq->hdev_kick);
+            vhost_svq_set_svq_kick_fd(svq, -1);
+        }
         return ret;
     }
 
@@ -1781,15 +1849,19 @@ static int vhost_user_set_vring_kick(struct vhost_dev *dev,
      * Inject a kick in case the back-end only starts vring processing upon
      * receiving a kick. The spec suggests this to improve compatibility.
      */
-    if (file->fd != -1) {
+    if (vr_file.fd != -1) {
         uint64_t val = 1;
         ssize_t nwritten;
 
         do {
-            nwritten = write(file->fd, &val, sizeof(val));
+            nwritten = write(vr_file.fd, &val, sizeof(val));
         } while (nwritten < 0 && errno == EINTR);
 
         if (nwritten < 0 && errno != EAGAIN /* back-end can already read */) {
+            if (svq != NULL) {
+                event_notifier_cleanup(&svq->hdev_kick);
+                vhost_svq_set_svq_kick_fd(svq, -1);
+            }
             return -errno;
         }
     }
@@ -1800,7 +1872,36 @@ static int vhost_user_set_vring_kick(struct vhost_dev *dev,
 static int vhost_user_set_vring_call(struct vhost_dev *dev,
                                      struct vhost_vring_file *file)
 {
-    return vhost_set_vring_file(dev, VHOST_USER_SET_VRING_CALL, file);
+    struct vhost_user *u = dev->opaque;
+    VhostUserState *user = u->user;
+    VhostShadowVirtqueue *svq = NULL;
+    struct vhost_vring_file vr_file = *file;
+    int ret;
+
+    vhost_user_get_vq_index(dev, file->index); /* bounds checking */
+
+    if (u->user->memory_isolation) {
+        svq = g_ptr_array_index(user->iso_mem_ctx.shadow_vqs, file->index);
+        vhost_svq_set_svq_call_fd(svq, file->fd);
+
+        if (file->fd != -1) {
+            if (!svq->hdev_call.initialized) {
+                ret = event_notifier_init(&svq->hdev_call, 0);
+                if (ret < 0) {
+                    event_notifier_cleanup(&svq->hdev_call);
+                    vhost_svq_set_svq_call_fd(svq, -1);
+                    error_report("Failed to create call event notifier");
+                    return ret;
+                }
+            }
+
+            vr_file.fd = event_notifier_get_fd(&svq->hdev_call);
+        } else {
+            event_notifier_cleanup(&svq->hdev_call);
+        }
+    }
+
+    return vhost_set_vring_file(dev, VHOST_USER_SET_VRING_CALL, &vr_file);
 }
 
 static int vhost_user_set_vring_err(struct vhost_dev *dev,
@@ -2794,6 +2895,20 @@ static int vhost_user_postcopy_notifier(NotifierWithReturn *notifier,
     return 0;
 }
 
+static void vhost_user_init_svq(struct vhost_dev *dev,
+                                struct VhostUserState *user)
+{
+    if (dev->vq_index == 0) {
+        user->iso_mem_ctx.shadow_vqs =
+            g_ptr_array_new_full(dev->vq_index_end, vhost_svq_free);
+    }
+    for (int i = 0; i < dev->nvqs; i++) {
+        VhostShadowVirtqueue *svq;
+        svq = vhost_svq_new(NULL, NULL);
+        g_ptr_array_add(user->iso_mem_ctx.shadow_vqs, svq);
+    }
+}
+
 static int vhost_user_backend_init(struct vhost_dev *dev, void *opaque,
                                    Error **errp)
 {
@@ -2943,6 +3058,10 @@ static int vhost_user_backend_init(struct vhost_dev *dev, void *opaque,
     u->postcopy_notifier.notify = vhost_user_postcopy_notifier;
     postcopy_add_notifier(&u->postcopy_notifier);
 
+    if (vus->memory_isolation) {
+        vhost_user_init_svq(dev, vus);
+    }
+
     return 0;
 }
 
@@ -2971,18 +3090,11 @@ static int vhost_user_backend_cleanup(struct vhost_dev *dev)
     g_free(u->region_rb_offset);
     u->region_rb_offset = NULL;
     u->region_rb_len = 0;
-    cleanup_isolation_regions(dev);
+    cleanup_isolation_regions(dev, false);
     g_free(u);
     dev->opaque = 0;
 
     return 0;
-}
-
-static int vhost_user_get_vq_index(struct vhost_dev *dev, int idx)
-{
-    assert(idx >= dev->vq_index && idx < dev->vq_index + dev->nvqs);
-
-    return idx;
 }
 
 static int vhost_user_memslots_limit(struct vhost_dev *dev)
