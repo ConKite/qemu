@@ -11,6 +11,7 @@
 #include "chardev/char-fe.h"
 #include "hw/virtio/virtio.h"
 #include "qapi/qapi-types-virtio.h"
+#include "hw/virtio/vhost-iova-tree.h"
 
 enum VhostUserProtocolFeature {
     VHOST_USER_PROTOCOL_F_MQ = 0,
@@ -63,11 +64,32 @@ typedef struct VhostUserHostNotifier {
 } VhostUserHostNotifier;
 
 /**
+ * IsolationModeCtx - state required when isolation mode is active
+ * @shared_mem_addr: mapped shared memory
+ * @tree: facilitates mapping between guest memory regions and IOVA space
+ * @vring_hva_addr: beginning of vring region in shared memory
+ * @vring_region_size: amount of shared memory reserved for vrings
+ * @size: size of the mapped shared memory
+ * @fd: descriptor of anonymous file backing shared iso region
+ * @iso_iova_offset: translation from IOVA to hva of iso region
+ */
+typedef struct {
+    void *shared_mem_addr;
+    VhostIOVATree *tree;
+    void *vring_hva_addr;
+    size_t vring_region_size;
+    size_t size;
+    int fd;
+    uintptr_t iso_iova_offset;
+} IsolationModeCtx;
+
+/**
  * VhostUserState - shared state for all vhost-user devices
  * @chr: the character backend for the socket
  * @notifiers: GPtrArray of @VhostUserHostnotifier
  * @memory_slots:
  * @memory_isolation: determines whether data is shared or copied
+ * @iso_mem_ctx: data specific to isolated memory mode
  */
 typedef struct VhostUserState {
     CharFrontend *chr;
@@ -75,6 +97,7 @@ typedef struct VhostUserState {
     int memory_slots;
     bool supports_config;
     bool memory_isolation;
+    IsolationModeCtx iso_mem_ctx;
 } VhostUserState;
 
 /**

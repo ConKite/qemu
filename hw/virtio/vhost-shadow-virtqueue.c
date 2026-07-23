@@ -800,20 +800,35 @@ void vhost_svq_get_vring_addr(const VhostShadowVirtqueue *svq,
     addr->used_user_addr = (uint64_t)(uintptr_t)svq->vring.used;
 }
 
-size_t vhost_svq_driver_area_size(const VhostShadowVirtqueue *svq)
+static size_t vhost_svq_driver_area_size_num(unsigned int num)
 {
-    size_t desc_size = sizeof(vring_desc_t) * svq->vring.num;
-    size_t avail_size = offsetof(vring_avail_t, ring[svq->vring.num]) +
-                                                              sizeof(uint16_t);
+    size_t desc_size = sizeof(vring_desc_t) * num;
+    size_t avail_size = offsetof(vring_avail_t, ring[num]) + sizeof(uint16_t);
 
     return ROUND_UP(desc_size + avail_size, qemu_real_host_page_size());
 }
 
+static size_t vhost_svq_device_area_size_num(unsigned int num)
+{
+    size_t used_size = offsetof(vring_used_t, ring[num]) + sizeof(uint16_t);
+
+    return ROUND_UP(used_size, qemu_real_host_page_size());
+}
+
+size_t vhost_svq_driver_area_size(const VhostShadowVirtqueue *svq)
+{
+    return vhost_svq_driver_area_size_num(svq->vring.num);
+}
+
 size_t vhost_svq_device_area_size(const VhostShadowVirtqueue *svq)
 {
-    size_t used_size = offsetof(vring_used_t, ring[svq->vring.num]) +
-                                                              sizeof(uint16_t);
-    return ROUND_UP(used_size, qemu_real_host_page_size());
+    return vhost_svq_device_area_size_num(svq->vring.num);
+}
+
+size_t vhost_svq_vring_total_size_num(unsigned int num)
+{
+    return vhost_svq_driver_area_size_num(num) +
+        vhost_svq_device_area_size_num(num);
 }
 
 /**
