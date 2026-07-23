@@ -1132,7 +1132,76 @@ static void cleanup_isolation_regions(struct vhost_dev *dev)
     }
 }
 
-__attribute__((unused))
+typedef struct {
+    VhostUserMsg *msg;
+    VhostUserState *user;
+    int *fds;
+    size_t fds_size;
+    uint64_t vring_iova;
+    size_t vring_size;
+    bool vring_node_visited;
+    size_t *idx;
+} IOVATreeTraversalArgs;
+
+static gboolean vhost_user_fill_msg_reg_from_tree(gpointer key,
+                                                  gpointer value,
+                                                  gpointer data)
+{
+    IOVATreeTraversalArgs *args = data;
+    VhostUserState *user;
+    VhostUserMsg *msg = args->msg;
+    DMAMap *map = key;
+    uint64_t offset;
+
+    assert(args && key && value);
+    if (!args->vring_node_visited) {
+        args->vring_node_visited = true;
+        return false;
+    }
+
+    user = args->user;
+    assert(*args->idx < args->fds_size);
+
+    args->fds[*args->idx] = user->iso_mem_ctx.fd;
+
+    /*
+     * If the number of regions is fixed, it would be wasteful to use one for
+     * only the vrings. The first vhost_iova_tree element is always
+     * reserved for the vrings, so we can simply combine the first and second
+     * elements, which are contiguous in IOVA space, when sending regions to
+     * the backend.
+     */
+    if (*args->idx == 0) {
+        offset = user->iso_mem_ctx.vring_hva_addr -
+                 user->iso_mem_ctx.shared_mem_addr;
+        msg->payload.memory.regions[*args->idx].userspace_addr =
+            args->vring_iova;
+        /*
+         * The size from the iova tree is inclusive, so 1 is added to it.
+         * args->vring_size is exclusive, so no addition is required.
+         */
+        msg->payload.memory.regions[*args->idx].memory_size =
+            args->vring_size + map->size + 1;
+        msg->payload.memory.regions[*args->idx].guest_phys_addr =
+            args->vring_iova;
+        msg->payload.memory.regions[*args->idx].mmap_offset = offset;
+    } else {
+        offset = map->iova + user->iso_mem_ctx.iso_iova_offset -
+                 (uint64_t)user->iso_mem_ctx.shared_mem_addr;
+
+        msg->payload.memory.regions[*args->idx].userspace_addr = map->iova;
+        msg->payload.memory.regions[*args->idx].memory_size = map->size + 1;
+        msg->payload.memory.regions[*args->idx].guest_phys_addr = map->iova;
+        msg->payload.memory.regions[*args->idx].mmap_offset = offset;
+    }
+
+    assert(offset + msg->payload.memory.regions[*args->idx].memory_size <=
+        user->iso_mem_ctx.size);
+    (*args->idx)++;
+
+    return false;
+}
+
 static int init_isolation_regions(struct vhost_dev *dev,
                                   VhostUserMsg *msg,
                                   int *fds, size_t *fd_num)
@@ -1152,6 +1221,7 @@ static int init_isolation_regions(struct vhost_dev *dev,
     DMAMap *map;
     DMAMap vring_map;
     int r;
+    IOVATreeTraversalArgs trav_args;
 
     msg->hdr.request = VHOST_USER_SET_MEM_TABLE;
 
@@ -1248,6 +1318,27 @@ static int init_isolation_regions(struct vhost_dev *dev,
                 return r;
             }
         }
+
+        *fd_num = 0;
+        trav_args.idx = fd_num;
+        trav_args.fds = fds;
+        trav_args.msg = msg;
+        trav_args.user = user;
+        trav_args.vring_iova = vring_map.iova;
+        trav_args.vring_size = total_vring_size;
+        trav_args.fds_size = nregions;
+        trav_args.vring_node_visited = false;
+
+        vhost_iova_tree_foreach(user->iso_mem_ctx.tree,
+                                vhost_user_fill_msg_reg_from_tree, &trav_args);
+
+        msg->payload.memory.nregions = *fd_num;
+
+        assert(*fd_num == nregions);
+
+        msg->hdr.size = sizeof(msg->payload.memory.nregions);
+        msg->hdr.size += sizeof(msg->payload.memory.padding);
+        msg->hdr.size += *fd_num * sizeof(VhostUserMemoryRegion);
     }
 
     return 0;
@@ -1257,6 +1348,7 @@ static int vhost_user_set_mem_table(struct vhost_dev *dev,
                                     struct vhost_memory *mem)
 {
     struct vhost_user *u = dev->opaque;
+    bool memory_isolation = u->user->memory_isolation;
     int fds[VHOST_MEMORY_BASELINE_NREGIONS];
     size_t fd_num = 0;
     bool do_postcopy = u->postcopy_listen && u->postcopy_fd.handler;
@@ -1268,6 +1360,11 @@ static int vhost_user_set_mem_table(struct vhost_dev *dev,
     int ret;
 
     if (do_postcopy) {
+        /* Postcopy is not supported with memory isolation yet */
+        if (memory_isolation) {
+            return -1;
+        }
+
         /*
          * Postcopy has enough differences that it's best done in it's own
          * version
@@ -1282,6 +1379,25 @@ static int vhost_user_set_mem_table(struct vhost_dev *dev,
 
     if (reply_supported) {
         msg.hdr.flags |= VHOST_USER_NEED_REPLY_MASK;
+    }
+
+    if (memory_isolation) {
+        ret = init_isolation_regions(dev, &msg, fds, &fd_num);
+        if (ret < 0) {
+            return ret;
+        }
+
+        /* If vq_index != 0, will not attempt to write to backend */
+        ret = vhost_user_write(dev, &msg, fds, fd_num);
+        if (ret < 0) {
+            return ret;
+        }
+
+        if (reply_supported) {
+            return process_message_reply(dev, &msg);
+        }
+
+        return 0;
     }
 
     if (config_mem_slots) {
