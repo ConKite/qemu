@@ -675,6 +675,19 @@ static void vhost_svq_flush(VhostShadowVirtqueue *svq,
                 break;
             }
 
+            if (svq->ops && svq->ops->used_callback) {
+                int r = svq->ops->used_callback(svq, elem, svq->ops_opaque);
+
+                if (r < 0) {
+                    virtio_error(svq->vdev, "Vhost shadow virtqueue error while"
+                        "handling used element.\n");
+                    virtqueue_detach_element(vq, elem, 0);
+                    g_free(elem);
+                    virtqueue_flush(vq, i);
+                    return;
+                }
+            }
+
             if (unlikely(i >= svq->vring.num)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
                          "More than %u used buffers obtained in a %u size SVQ",
