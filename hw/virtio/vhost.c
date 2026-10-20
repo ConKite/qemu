@@ -692,6 +692,7 @@ static void vhost_begin(MemoryListener *listener)
 
 static void vhost_commit(MemoryListener *listener)
 {
+    printf("vhost_commit\n");
     struct vhost_dev *dev = container_of(listener, struct vhost_dev,
                                          memory_listener);
     MemoryRegionSection *old_sections;
@@ -2226,11 +2227,13 @@ int vhost_dev_start(struct vhost_dev *hdev, VirtIODevice *vdev, bool vrings)
         memory_listener_register(&hdev->iommu_listener, vdev->dma_as);
     }
 
+    printf("Vhost-setting-mem-table\n");
     r = hdev->vhost_ops->vhost_set_mem_table(hdev, hdev->mem);
     if (r < 0) {
         VHOST_OPS_DEBUG(r, "vhost_set_mem_table failed");
         goto fail_mem;
     }
+    printf("vhost-starting vq\n");
     for (i = 0; i < hdev->nvqs; ++i) {
         r = vhost_virtqueue_start(hdev,
                                   vdev,
@@ -2241,6 +2244,7 @@ int vhost_dev_start(struct vhost_dev *hdev, VirtIODevice *vdev, bool vrings)
         }
     }
 
+    printf("vhost-event-notifier-init\n");
     r = event_notifier_init(
         &hdev->vqs[VHOST_QUEUE_NUM_CONFIG_INR].masked_config_notifier, 0);
     if (r < 0) {
@@ -2270,12 +2274,14 @@ int vhost_dev_start(struct vhost_dev *hdev, VirtIODevice *vdev, bool vrings)
         vhost_dev_elect_mem_logger(hdev, true);
     }
     if (vrings) {
+        printf("vhost-enable-vrings\n");
         r = vhost_dev_set_vring_enable(hdev, true);
         if (r) {
             goto fail_log;
         }
     }
     if (hdev->vhost_ops->vhost_dev_start) {
+        printf("vhost-dev-start\n");
         r = hdev->vhost_ops->vhost_dev_start(hdev, true);
         if (r) {
             goto fail_start;

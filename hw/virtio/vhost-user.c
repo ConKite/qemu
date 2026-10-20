@@ -501,7 +501,12 @@ static int vhost_user_write(struct vhost_dev *dev, VhostUserMsg *msg,
      * Devices with multiple vhost_devs are given an associated dev->vq_index
      * so per_device requests are only sent if vq_index is 0.
      */
-    if (vhost_user_per_device_request(msg->hdr.request)
+     if (msg->hdr.request == VHOST_USER_SET_VRING_ENABLE ||
+        msg->hdr.request == VHOST_USER_NONE) {
+        printf("Set mem table\n");
+     }
+
+     if (vhost_user_per_device_request(msg->hdr.request)
         && dev->vq_index != 0) {
         msg->hdr.flags &= ~VHOST_USER_NEED_REPLY_MASK;
         return 0;
@@ -1141,7 +1146,7 @@ static void cleanup_isolation_regions(struct vhost_dev *dev, bool reset)
     struct vhost_user *u = dev->opaque;
     VhostUserState *user = u->user;
     vhost_user_svq_cleanup(user, reset);
-
+    printf("iso_region_cleanup\n");
     if (user->iso_mem_ctx.shared_mem_addr) {
         GPtrArray *temp = user->iso_mem_ctx.shadow_vqs;
 
@@ -1228,6 +1233,8 @@ static gboolean vhost_user_fill_msg_reg_from_tree(gpointer key,
 
     return false;
 }
+
+int first = 1;
 
 static int init_isolation_regions(struct vhost_dev *dev,
                                   VhostUserMsg *msg,
@@ -1407,6 +1414,10 @@ static int vhost_user_svq_handle_used(VhostShadowVirtqueue *svq,
     DMAMap needle;
     int reg_idx;
 
+    if (virtio_get_queue_index(svq->vq) == 0) {
+        printf("Control!\n");
+    }
+
     for (int i = 0; i < elem->in_num; i++) {
         needle.translated_addr = elem->in_addr[i];
         needle.size = elem->in_sg[i].iov_len - 1;
@@ -1490,6 +1501,10 @@ static int vhost_user_svq_handle_avail(VhostShadowVirtqueue *svq,
     void *shmem_addr = user->iso_mem_ctx.shared_mem_addr;
     size_t shmem_size = user->iso_mem_ctx.size;
     int reg_idx;
+
+    if (virtio_get_queue_index(svq->vq) == 0) {
+        printf("Control!\n");
+    }
 
     for (int i = 0; i < elem->out_num; i++) {
         needle.translated_addr = elem->out_addr[i];
@@ -1615,6 +1630,12 @@ static int vhost_user_set_mem_table(struct vhost_dev *dev,
         vhost_user_has_protocol_feature(
             dev, VHOST_USER_PROTOCOL_F_CONFIGURE_MEM_SLOTS);
     int ret;
+
+    if (!first) {
+        return 0;
+    }
+
+    first = 0;
 
     if (do_postcopy) {
         /* Postcopy is not supported with memory isolation yet */

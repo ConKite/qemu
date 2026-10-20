@@ -372,6 +372,10 @@ int vhost_svq_add_element(VhostShadowVirtqueue *svq,
  */
 static void vhost_handle_guest_kick(VhostShadowVirtqueue *svq)
 {
+    if (virtio_get_queue_index(svq->vq) == 0) {
+        printf("Handling Queue 0 Avail in svq\n");
+    }
+
     /* Clear event notifier */
     event_notifier_test_and_clear(&svq->svq_kick);
 
@@ -784,6 +788,8 @@ void vhost_svq_set_svq_call_fd(VhostShadowVirtqueue *svq, int call_fd)
         memset(&svq->svq_call, 0, sizeof(svq->svq_call));
     } else {
         event_notifier_init_fd(&svq->svq_call, call_fd);
+        event_notifier_set_handler(&svq->hdev_call, vhost_svq_handle_call);
+
     }
 }
 
@@ -941,10 +947,12 @@ int vhost_svq_start(VhostShadowVirtqueue *svq, VirtIODevice *vdev,
  */
 void vhost_svq_stop(VhostShadowVirtqueue *svq)
 {
+    printf("svq-stop\n");
     vhost_svq_set_svq_kick_fd(svq, VHOST_FILE_UNBIND);
     g_autofree VirtQueueElement *next_avail_elem = NULL;
 
     if (!svq->vq) {
+        printf("svq-didn't have a vq\n");
         return;
     }
 
